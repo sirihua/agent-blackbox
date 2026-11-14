@@ -1,0 +1,26 @@
+# 运行产物
+traces/*.jsonl
+!traces/.gitkeep
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# 环境变量与密钥（千万不要提交）
+.env
+.env.*
+
+# 系统与编辑器
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# 演示录屏等大文件（放网盘，不进仓库）
+*.mp4
+*.mov
+*.mkv
+*.zip
