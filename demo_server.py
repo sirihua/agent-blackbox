@@ -6,8 +6,8 @@ Agent 黑匣子 · 48 小时黑客松可运行 Demo
 
 零依赖（仅 Python 标准库），用于演示 A3 选题的完整故事：
 
-    1. 让一个「校园财务助手」Agent 执行「报销 9 月差旅费」
-    2. 中途注入一次「财务系统超时」，Agent 自动重试
+    1. 让一个「校园图书馆借阅助手」Agent 执行「借《算法导论》」
+    2. 中途注入一次「图书馆系统超时」，Agent 自动重试
     3. 黑匣子记录每一步 -> 检出「重复提交」「越权调用」「单步成本异常」
     4. 开启守护模式（自动加幂等键 / 拦截越权 / 压缩工具输出）后重跑
     5. 对比两次运行，一键下载「事故报告」
@@ -50,8 +50,8 @@ PRICE_OUTPUT_PER_TOKEN = 1.5 / 1_000_000
 
 # 审计策略（对应方案文档里的 policies.json，现场可直接改这里做「让评委喊故障」演示）
 POLICIES = {
-    "deny_tools": ["approve_reimbursement"],          # 越权工具：直接拒绝
-    "require_human_approval": ["create_reimbursement"],  # 生产环境应接人工确认
+    "deny_tools": ["waive_fine"],          # 越权工具：直接拒绝
+    "require_human_approval": ["create_borrow"],  # 生产环境应接人工确认
     "max_steps": 12,
     "max_cost_per_run": 0.05,
     "max_single_step_cost_ratio": 0.40,               # 单步成本超过 40% 即告警
@@ -61,7 +61,7 @@ RUNS = {}          # trace_id -> trace dict
 RUN_ORDER = []     # 运行顺序
 LOCK = threading.Lock()
 
-FINANCE = {}       # 模拟财务系统：invoice_no -> {"count": int, "receipts": {idem_key: receipt}}
+LIBRARY = {}       # 模拟图书馆系统：book_id -> {"count": int, "receipts": {idem_key: receipt}}
 
 # ----------------------------------------------------------------------------
 # 工具函数
@@ -137,14 +137,14 @@ class Trace(object):
 
 
 # ----------------------------------------------------------------------------
-# 模拟财务系统
+# 模拟图书馆系统
 # ----------------------------------------------------------------------------
 
 
-def _finance_create(args):
-    """提交报销。带幂等键时天然去重。"""
-    invoice_no = args.get("invoice_no", "unknown")
-    rec = FINANCE.setdefault(invoice_no, {"count": 0, "receipts": {}})
+def _borrow_create(args):
+    """提交借阅。带幂等键时天然去重。"""
+    book_id = args.get("book_id", "unknown")
+    rec = LIBRARY.setdefault(book_id, {"count": 0, "receipts": {}})
     key = args.get("idempotency_key")
 
     if key and key in rec["receipts"]:
@@ -189,62 +189,62 @@ def call_tool(trace, guard, name, args, fault_state=None):
 
     call_args = dict(args)
     if guard and name in POLICIES["require_human_approval"]:
-        # 现场演示：为「重试」自动生成幂等键（这是防重复付款的关键）
+        # 现场演示：为「重试」自动生成幂等键（这是防重复借阅的关键）
         if not call_args.get("idempotency_key"):
-            raw = "{}|{}".format(call_args.get("invoice_no", ""), call_args.get("amount", ""))
+            raw = "{}|{}".format(call_args.get("book_id", ""), call_args.get("student_id", ""))
             call_args["idempotency_key"] = "idem-" + hashlib.md5(raw.encode("utf-8")).hexdigest()[:10]
             meta["guard"] = "inject_idempotency_key"
 
-    if guard and name == "get_invoice_detail":
+    if guard and name == "get_book_detail":
         meta["guard"] = "trim_output"
 
     # ---- 2. 模拟外部系统返回 ----
-    if name == "list_invoices":
-        result = [{"invoice_no": "INV-2026-0912", "amount": 680.0, "date": "2026-09-12"}]
+    if name == "search_books":
+        result = [{"book_id": "BK-2026-0912", "title": "算法导论", "available": True}]
         trace.add("tool", name, call_args, result, duration_ms=35, meta=meta)
         return result
 
-    if name == "get_invoice_detail":
+    if name == "get_book_detail":
         if guard:
             result = {
-                "invoice_no": call_args.get("invoice_no"),
-                "amount": 680.0,
-                "summary": "住宿 480 元 + 高铁 200 元 = 680 元（黑匣子已将整份扫描件压缩为摘要）",
+                "book_id": call_args.get("book_id"),
+                "title": "算法导论",
+                "summary": "《算法导论》介绍算法设计与分析（黑匣子已将完整书目简介压缩为摘要）",
                 "compressed": True,
             }
         else:
             result = {
-                "invoice_no": call_args.get("invoice_no"),
-                "amount": 680.0,
-                "full_text": "（模拟）整份报销单扫描件全文，约 1.6 万字符；它会被整段塞进大模型上下文",
+                "book_id": call_args.get("book_id"),
+                "title": "算法导论",
+                "full_text": "（模拟）完整书目简介，约 1.6 万字符；它会被整段塞进大模型上下文",
                 "compressed": False,
             }
         trace.add("tool", name, call_args, result, duration_ms=90, meta=meta)
         return result
 
-    if name == "create_reimbursement":
-        result = _finance_create(call_args)
+    if name == "create_borrow":
+        result = _borrow_create(call_args)
 
         # 故障注入：第一次提交「系统已收到，但回执超时」
-        if fault_state is not None and fault_state.get("create_reimbursement", 0) > 0:
-            fault_state["create_reimbursement"] -= 1
+        if fault_state is not None and fault_state.get("create_borrow", 0) > 0:
+            fault_state["create_borrow"] -= 1
             trace.add(
                 "tool", name, call_args,
-                {"error": "timeout", "message": "财务系统响应超时（请求可能已提交）"},
+                {"error": "timeout", "message": "图书馆系统响应超时（请求可能已提交）"},
                 status="error", duration_ms=1200,
                 meta=dict(meta, fault="timeout"),
             )
-            return {"error": "timeout", "message": "财务系统响应超时（请求可能已提交）"}
+            return {"error": "timeout", "message": "图书馆系统响应超时（请求可能已提交）"}
 
         trace.add("tool", name, call_args, result, duration_ms=180, meta=meta)
         return result
 
-    if name == "approve_reimbursement":
+    if name == "waive_fine":
         # 注意：无守护时 Agent 真的会执行它（越权）
         trace.add("tool", name, call_args,
-                  {"status": "approved", "approver": "agent"},
+                  {"status": "waived", "operator": "agent"},
                   duration_ms=90, meta=meta)
-        return {"status": "approved"}
+        return {"status": "waived"}
 
     if name == "notify_user":
         trace.add("tool", name, call_args, {"status": "sent"}, duration_ms=15, meta=meta)
@@ -263,83 +263,83 @@ def call_tool(trace, guard, name, args, fault_state=None):
 
 def run_agent(mode="faulty"):
     """
-    运行一次「校园财务助手」任务。
+    运行一次「校园图书馆借阅助手」任务。
     mode="faulty"：未开守护（会重复提交 + 越权 + 成本失控）
     mode="fixed" ：开启守护（幂等去重 + 越权拦截 + 输出压缩）
     """
     guard = (mode == "fixed")
-    FINANCE.clear()  # 每次演示都从干净的财务系统开始
-    trace = Trace("帮我报销 9 月去北京开会的差旅费（发票 INV-2026-0912）", mode)
-    fault_state = {"create_reimbursement": 1}
+    LIBRARY.clear()  # 每次演示都从干净的图书馆系统开始
+    trace = Trace("帮我借《算法导论》（馆藏号 BK-2026-0912）", mode)
+    fault_state = {"create_borrow": 1}
 
     # 1) LLM 规划
     trace.add(
         "llm", "plan",
-        {"messages": [{"role": "user", "content": "帮我报销 9 月去北京开会的差旅费"}]},
-        {"content": "好的，我先查一下待报销的发票。"},
+        {"messages": [{"role": "user", "content": "帮我借《算法导论》（馆藏号 BK-2026-0912）"}]},
+        {"content": "好的，我先查一下可借书目。"},
         prompt_tokens=820, completion_tokens=42, duration_ms=640,
     )
 
-    # 2) 查发票列表
-    call_tool(trace, guard, "list_invoices", {"status": "pending"})
+    # 2) 查可借书目
+    call_tool(trace, guard, "search_books", {"title": "算法导论", "available": True})
 
-    # 3) LLM 选择发票
+    # 3) LLM 选择图书
     trace.add(
-        "llm", "select_invoice",
-        {"messages": [{"role": "assistant", "content": "查到 1 张待报销发票，我再确认下明细。"}]},
-        {"content": "找到发票 INV-2026-0912，金额 680 元。我先读取发票明细。"},
+        "llm", "select_book",
+        {"messages": [{"role": "assistant", "content": "查到 1 本可借图书，我再确认下详情。"}]},
+        {"content": "找到《算法导论》，馆藏号 BK-2026-0912。我先读取书目详情。"},
         prompt_tokens=1180, completion_tokens=60, duration_ms=710,
     )
 
-    # 4) 读发票明细（守护模式会压缩输出）
-    call_tool(trace, guard, "get_invoice_detail", {"invoice_no": "INV-2026-0912"})
+    # 4) 读书目详情（守护模式会压缩输出）
+    call_tool(trace, guard, "get_book_detail", {"book_id": "BK-2026-0912"})
 
     # 5) LLM 提取信息并决定提交
-    #    未开守护时：整份扫描件进入上下文 -> 单步成本爆炸（演示「成本黑洞」）
+    #    未开守护时：完整书目简介进入上下文 -> 单步成本爆炸（演示「成本黑洞」）
     prompt_tokens = 2900 if guard else 16800
     trace.add(
         "llm", "extract_and_decide",
-        {"messages": [{"role": "assistant", "content": "读取发票明细后决定提交报销。"}]},
-        {"content": "发票信息已提取：住宿 480 元、高铁 200 元，合计 680 元。现在提交报销。"},
+        {"messages": [{"role": "assistant", "content": "读取书目详情后决定提交借阅。"}]},
+        {"content": "书目详情已确认，《算法导论》可借。现在提交借阅。"},
         prompt_tokens=prompt_tokens, completion_tokens=90, duration_ms=1450,
     )
 
-    # 6) 提交报销（第一次会命中「回执超时」故障）
-    call_tool(trace, guard, "create_reimbursement",
-              {"invoice_no": "INV-2026-0912", "amount": 680.0},
+    # 6) 提交借阅（第一次会命中「回执超时」故障）
+    call_tool(trace, guard, "create_borrow",
+              {"book_id": "BK-2026-0912", "student_id": "STU-001"},
               fault_state=fault_state)
 
     # 7) LLM 决定重试
     trace.add(
         "llm", "retry_decision",
         {"messages": [{"role": "assistant", "content": "提交返回超时，判断是否需要重试。"}]},
-        {"content": "刚才提交超时，我再试一次，确保报销成功。"},
+        {"content": "刚才提交超时，我再试一次，确保借阅成功。"},
         prompt_tokens=1600, completion_tokens=30, duration_ms=520,
     )
 
     # 8) 重试提交
-    call_tool(trace, guard, "create_reimbursement",
-              {"invoice_no": "INV-2026-0912", "amount": 680.0},
+    call_tool(trace, guard, "create_borrow",
+              {"book_id": "BK-2026-0912", "student_id": "STU-001"},
               fault_state=fault_state)
 
-    # 9) 为了让流程「更快完成」，Agent 直接调用审批接口（越权）
-    call_tool(trace, guard, "approve_reimbursement",
-              {"invoice_no": "INV-2026-0912", "approver": "agent"})
+    # 9) Agent 试图直接调用管理员接口豁免逾期罚款（越权）
+    call_tool(trace, guard, "waive_fine",
+              {"student_id": "STU-001", "operator": "agent"})
 
     if guard:
         # 10) 守护模式下：越权被拦，Agent 改为通知用户人工确认
         trace.add(
             "llm", "adapt_after_block",
-            {"messages": [{"role": "assistant", "content": "审批接口被拒绝，改为通知用户人工确认。"}]},
-            {"content": "审批需要人工操作，已生成待办并通知你确认。"},
+            {"messages": [{"role": "assistant", "content": "罚款豁免接口被拒绝，改为通知用户联系管理员。"}]},
+            {"content": "罚款豁免需要管理员处理，已通知你联系管理员。"},
             prompt_tokens=2100, completion_tokens=70, duration_ms=880,
         )
         call_tool(trace, guard, "notify_user",
-                  {"to": "student", "message": "报销已提交，审批需人工确认，请到财务系统确认"})
+                  {"to": "student", "message": "借阅已提交，罚款豁免需由管理员处理，请联系图书馆"})
         trace.add(
             "llm", "final_answer",
             {"messages": [{"role": "assistant", "content": "汇总结果并回复用户。"}]},
-            {"content": "已提交报销（发票 INV-2026-0912，680 元）；审批已转为人工确认，请查收通知。"},
+            {"content": "已提交《算法导论》的借阅（馆藏号 BK-2026-0912）；罚款豁免需由管理员处理，请查收通知。"},
             prompt_tokens=800, completion_tokens=40, duration_ms=420,
         )
     else:
@@ -347,7 +347,7 @@ def run_agent(mode="faulty"):
         trace.add(
             "llm", "final_answer",
             {"messages": [{"role": "assistant", "content": "汇总结果并回复用户。"}]},
-            {"content": "已为您完成报销，审批已通过。"},
+            {"content": "已为您完成《算法导论》借阅，并豁免逾期罚款。"},
             prompt_tokens=1900, completion_tokens=60, duration_ms=560,
         )
 
@@ -365,16 +365,16 @@ def audit(trace):
     steps = trace["steps"]
     total_cost = trace["summary"]["total_cost"] or 1e-9
 
-    # ---- 规则 1：重复副作用（同一发票被提交多次且未去重） ----
+    # ---- 规则 1：重复副作用（同一本书被重复借阅且未去重） ----
     creates = [s for s in steps
-               if s["type"] == "tool" and s["name"] == "create_reimbursement"]
-    by_invoice = {}
+               if s["type"] == "tool" and s["name"] == "create_borrow"]
+    by_book = {}
     for s in creates:
-        inv = (s.get("input") or {}).get("invoice_no")
+        inv = (s.get("input") or {}).get("book_id")
         if inv:
-            by_invoice.setdefault(inv, []).append(s)
+            by_book.setdefault(inv, []).append(s)
 
-    for inv, items in by_invoice.items():
+    for inv, items in by_book.items():
         if len(items) < 2:
             continue
         deduped = any(
@@ -389,7 +389,7 @@ def audit(trace):
                 "code": "DEDUPLICATED",
                 "step": last["step"],
                 "title": "重复请求已被幂等键自动去重",
-                "detail": "重试请求携带了与首次相同的幂等键，财务系统返回原回执，未产生第二笔提交。",
+                "detail": "重试请求携带了与首次相同的幂等键，图书馆系统返回原回执，未占用第二个副本。",
                 "fix": "保持幂等键策略；生产环境要求下游系统支持幂等键。",
             })
         else:
@@ -397,10 +397,10 @@ def audit(trace):
                 "severity": "critical",
                 "code": "DUPLICATE_SIDE_EFFECT",
                 "step": last["step"],
-                "title": "重复提交同一张发票（疑似重复付款）",
-                "detail": "发票 {} 共提交 {} 次，其中 {} 次为超时后重试；重试请求未携带幂等键。".format(
+                "title": "重复借阅（占用 2 个副本）",
+                "detail": "图书 {} 共提交借阅 {} 次，其中 {} 次为超时后重试；重试请求未携带幂等键。".format(
                     inv, len(items), sum(1 for s in items if s["status"] == "error")),
-                "fix": "为所有重试请求注入幂等键，并要求财务系统按幂等键去重；重试次数设上限。",
+                "fix": "为所有重试请求注入幂等键，并要求图书馆系统按幂等键去重；重试次数设上限。",
             })
             error_step = next((s for s in items if s["status"] == "error"), None)
             if error_step:
@@ -424,16 +424,16 @@ def audit(trace):
                 "step": s["step"],
                 "title": "越权调用已被守护层拦截",
                 "detail": "工具 {} 不在该 Agent 的权限范围内，调用被拒绝，Agent 改为人工确认。".format(s["name"]),
-                "fix": "保持 deny 策略；生产中接入审批流。",
+                "fix": "保持 deny 策略；罚款豁免由管理员处理。",
             })
         else:
             findings.append({
                 "severity": "critical",
                 "code": "UNAUTHORIZED_TOOL_CALL",
                 "step": s["step"],
-                "title": "越权调用：Agent 执行了无权限的工具",
+                "title": "越权豁免罚款：Agent 执行了管理员工具",
                 "detail": "工具 {} 不在该 Agent 的权限范围内，但没有被拦截，已实际执行。".format(s["name"]),
-                "fix": "在守护层配置 deny_tools；敏感操作强制人工审批。",
+                "fix": "在守护层配置 deny_tools；罚款豁免交由管理员处理。",
             })
 
     # ---- 规则 3：单步成本异常 ----
